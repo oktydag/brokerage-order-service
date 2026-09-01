@@ -1,8 +1,8 @@
 package com.brokerage.asset.domain;
 
-import com.brokerage.common.domain.Amount;
-import com.brokerage.common.domain.AssetName;
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.Amount;
+import com.brokerage.common.domain.valueobjects.AssetName;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import com.brokerage.common.domain.DomainException;
 
 public class InsufficientUsableBalanceException extends DomainException {

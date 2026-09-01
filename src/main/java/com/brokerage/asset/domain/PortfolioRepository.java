@@ -1,6 +1,6 @@
 package com.brokerage.asset.domain;
 
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 
 public interface PortfolioRepository {
 

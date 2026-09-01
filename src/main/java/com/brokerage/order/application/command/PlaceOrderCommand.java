@@ -1,9 +1,9 @@
 package com.brokerage.order.application.command;
 
-import com.brokerage.common.domain.Amount;
-import com.brokerage.common.domain.AssetName;
-import com.brokerage.common.domain.CustomerId;
-import com.brokerage.order.domain.OrderSide;
+import com.brokerage.common.domain.valueobjects.Amount;
+import com.brokerage.common.domain.valueobjects.AssetName;
+import com.brokerage.common.domain.valueobjects.CustomerId;
+import com.brokerage.order.domain.valueobjects.OrderSide;
 
 public record PlaceOrderCommand(
         CustomerId customerId,

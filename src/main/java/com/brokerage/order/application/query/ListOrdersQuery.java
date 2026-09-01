@@ -1,9 +1,9 @@
 package com.brokerage.order.application.query;
 
-import com.brokerage.common.domain.AssetName;
-import com.brokerage.common.domain.CustomerId;
-import com.brokerage.order.domain.OrderSide;
-import com.brokerage.order.domain.OrderStatus;
+import com.brokerage.common.domain.valueobjects.AssetName;
+import com.brokerage.common.domain.valueobjects.CustomerId;
+import com.brokerage.order.domain.valueobjects.OrderSide;
+import com.brokerage.order.domain.valueobjects.OrderStatus;
 import org.springframework.data.domain.Pageable;
 
 import java.time.Instant;

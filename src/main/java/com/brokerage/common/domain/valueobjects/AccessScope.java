@@ -1,4 +1,6 @@
-package com.brokerage.common.domain;
+package com.brokerage.common.domain.valueobjects;
+
+import com.brokerage.common.domain.ForbiddenException;
 
 import java.util.Optional;
 

@@ -197,9 +197,19 @@ a single context would be decoration.
 `Order.match()` enforce their own rules. There are no balance or status setters, so no caller —
 present or future — can move a balance or a lifecycle state without passing through the checks.
 
-**Value objects.** `Amount` (BigDecimal at fixed scale, never floating point), `CustomerId` and
-`AssetName`. Typed identifiers make the classic transposition bug in calls like
-`reserve(customerId, assetName)` a compile error rather than a support ticket.
+**Value objects.** Collected in a `valueobjects` package under each domain so the tactical
+building blocks are visible at a glance rather than mixed in with entities and exceptions:
+
+| Package | Value objects |
+|---|---|
+| `common.domain.valueobjects` | `Amount`, `CustomerId`, `AssetName`, `Reservation`, `Settlement`, `AccessScope` |
+| `order.domain.valueobjects` | `OrderSide`, `OrderStatus` |
+
+`Amount` is BigDecimal at a fixed scale, never floating point. Typed identifiers make the
+classic transposition bug in calls like `reserve(customerId, assetName)` a compile error
+rather than a support ticket. Entities and aggregate roots — `Order`, `Asset`, `Portfolio` —
+stay in the domain package itself, so the distinction between what has identity and what does
+not is readable from the directory tree.
 
 **Ubiquitous language.** The specification's vocabulary is kept verbatim — `usableSize`, `size`,
 `orderSide`, `createDate`, `PENDING`/`MATCHED`/`CANCELED`. Renaming `usableSize` to something
@@ -413,8 +423,9 @@ evaluation scale.
 ```
 com.brokerage
 ├── common
-│   ├── domain          Amount, CustomerId, AssetName, Reservation, Settlement,
-│   │                   AccessScope, exception base
+│   ├── domain
+│   │   └── valueobjects  Amount, CustomerId, AssetName, Reservation,
+│   │                     Settlement, AccessScope
 │   ├── application     CommandHandler, QueryHandler
 │   ├── jpa             Value-object attribute converters
 │   ├── web             RFC 7807 handling, pagination envelope
@@ -426,7 +437,8 @@ com.brokerage
 │   ├── infrastructure  JPA repositories, locking, specifications
 │   └── web             AssetController
 ├── order
-│   ├── domain          Order (aggregate root), OrderSide, lifecycle, events
+│   ├── domain          Order (aggregate root), repository, events
+│   │   └── valueobjects  OrderSide, OrderStatus
 │   ├── application
 │   │   ├── command     PlaceOrder, CancelOrder + handlers
 │   │   └── query       ListOrders, GetOrder + handlers

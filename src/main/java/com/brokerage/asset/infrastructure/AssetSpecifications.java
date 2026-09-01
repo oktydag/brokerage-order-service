@@ -2,7 +2,7 @@ package com.brokerage.asset.infrastructure;
 
 import com.brokerage.asset.application.query.ListAssetsQuery;
 import com.brokerage.asset.domain.Asset;
-import com.brokerage.common.domain.Amount;
+import com.brokerage.common.domain.valueobjects.Amount;
 import jakarta.persistence.criteria.Predicate;
 import org.springframework.data.jpa.domain.Specification;
 

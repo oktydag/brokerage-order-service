@@ -1,7 +1,7 @@
 package com.brokerage.asset.application.query;
 
-import com.brokerage.common.domain.AssetName;
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.AssetName;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import org.springframework.data.domain.Pageable;
 
 public record ListAssetsQuery(

@@ -1,6 +1,6 @@
 package com.brokerage.common.jpa;
 
-import com.brokerage.common.domain.Amount;
+import com.brokerage.common.domain.valueobjects.Amount;
 import jakarta.persistence.AttributeConverter;
 import jakarta.persistence.Converter;
 

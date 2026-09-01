@@ -1,6 +1,6 @@
 package com.brokerage.order.web;
 
-import com.brokerage.order.domain.OrderSide;
+import com.brokerage.order.domain.valueobjects.OrderSide;
 import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;

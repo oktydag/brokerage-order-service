@@ -3,7 +3,7 @@ package com.brokerage.asset.infrastructure;
 import com.brokerage.asset.domain.Asset;
 import com.brokerage.asset.domain.Portfolio;
 import com.brokerage.asset.domain.PortfolioRepository;
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;

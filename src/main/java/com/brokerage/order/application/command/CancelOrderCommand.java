@@ -1,6 +1,6 @@
 package com.brokerage.order.application.command;
 
-import com.brokerage.common.domain.AccessScope;
+import com.brokerage.common.domain.valueobjects.AccessScope;
 
 import java.util.UUID;
 

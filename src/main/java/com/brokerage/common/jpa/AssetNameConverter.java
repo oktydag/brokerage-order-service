@@ -1,6 +1,6 @@
 package com.brokerage.common.jpa;
 
-import com.brokerage.common.domain.AssetName;
+import com.brokerage.common.domain.valueobjects.AssetName;
 import jakarta.persistence.AttributeConverter;
 import jakarta.persistence.Converter;
 

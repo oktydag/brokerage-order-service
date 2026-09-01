@@ -1,8 +1,8 @@
 package com.brokerage.order.web;
 
-import com.brokerage.common.domain.Amount;
-import com.brokerage.common.domain.AssetName;
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.Amount;
+import com.brokerage.common.domain.valueobjects.AssetName;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import com.brokerage.common.web.PageResponse;
 import com.brokerage.order.application.OrderView;
 import com.brokerage.order.application.command.CancelOrderCommand;
@@ -13,8 +13,8 @@ import com.brokerage.order.application.query.GetOrderHandler;
 import com.brokerage.order.application.query.GetOrderQuery;
 import com.brokerage.order.application.query.ListOrdersHandler;
 import com.brokerage.order.application.query.ListOrdersQuery;
-import com.brokerage.order.domain.OrderSide;
-import com.brokerage.order.domain.OrderStatus;
+import com.brokerage.order.domain.valueobjects.OrderSide;
+import com.brokerage.order.domain.valueobjects.OrderStatus;
 import com.brokerage.security.AccessPolicy;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;

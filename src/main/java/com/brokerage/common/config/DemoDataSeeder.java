@@ -2,9 +2,9 @@ package com.brokerage.common.config;
 
 import com.brokerage.asset.domain.Portfolio;
 import com.brokerage.asset.domain.PortfolioRepository;
-import com.brokerage.common.domain.Amount;
-import com.brokerage.common.domain.AssetName;
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.Amount;
+import com.brokerage.common.domain.valueobjects.AssetName;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import com.brokerage.security.AppUser;
 import com.brokerage.security.AppUserRepository;
 import com.brokerage.security.Role;

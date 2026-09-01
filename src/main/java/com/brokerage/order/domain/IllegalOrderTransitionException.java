@@ -1,6 +1,7 @@
 package com.brokerage.order.domain;
 
 import com.brokerage.common.domain.DomainException;
+import com.brokerage.order.domain.valueobjects.OrderStatus;
 
 import java.util.UUID;
 

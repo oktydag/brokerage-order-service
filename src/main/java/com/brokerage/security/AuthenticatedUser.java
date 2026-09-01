@@ -1,6 +1,6 @@
 package com.brokerage.security;
 
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;

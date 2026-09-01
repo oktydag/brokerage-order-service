@@ -1,7 +1,7 @@
 package com.brokerage.asset.infrastructure;
 
 import com.brokerage.asset.domain.Asset;
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;

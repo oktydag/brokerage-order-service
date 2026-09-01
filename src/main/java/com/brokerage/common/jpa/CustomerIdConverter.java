@@ -1,6 +1,6 @@
 package com.brokerage.common.jpa;
 
-import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.valueobjects.CustomerId;
 import jakarta.persistence.AttributeConverter;
 import jakarta.persistence.Converter;
 

@@ -1,4 +1,4 @@
-package com.brokerage.common.domain;
+package com.brokerage.common.domain.valueobjects;
 
 import java.io.Serializable;
 

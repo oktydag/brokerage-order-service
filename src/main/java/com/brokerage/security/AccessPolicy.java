@@ -1,6 +1,6 @@
 package com.brokerage.security;
 
-import com.brokerage.common.domain.AccessScope;
+import com.brokerage.common.domain.valueobjects.AccessScope;
 import com.brokerage.common.domain.ForbiddenException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
