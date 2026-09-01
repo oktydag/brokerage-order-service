@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: brokerage-order-service
+
+  datasource:
+    url: jdbc:h2:mem:brokerage;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+    hikari:
+      pool-name: brokerage-pool
+      maximum-pool-size: 20
+      connection-timeout: 5000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+        jakarta.persistence.lock.timeout: 5000
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  jackson:
+    default-property-inclusion: non_null
+    mapper:
+      accept-case-insensitive-enums: true
+    generator:
+      write-bigdecimal-as-plain: true
+    serialization:
+      write-dates-as-timestamps: false
+
+  mvc:
+    problemdetails:
+      enabled: true
+
+  data:
+    web:
+      pageable:
+        default-page-size: 20
+        max-page-size: 200
+
+  threads:
+    virtual:
+      enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+
+logging:
+  level:
+    com.brokerage: INFO
+
+app:
+  demo-data:
+    enabled: true
+    users:
+      - username: admin
+        password: admin123
+        role: ADMIN
+      - username: alice
+        password: alice123
+        role: CUSTOMER
+        customer-id: CUST-1001
+      - username: bob
+        password: bob123
+        role: CUSTOMER
+        customer-id: CUST-1002
+    holdings:
+      - { customer-id: CUST-1001, asset-name: TRY, size: 250000 }
+      - { customer-id: CUST-1001, asset-name: THYAO, size: 500 }
+      - { customer-id: CUST-1001, asset-name: ASELS, size: 300 }
+      - { customer-id: CUST-1002, asset-name: TRY, size: 75000 }
+      - { customer-id: CUST-1002, asset-name: GARAN, size: 1000 }
