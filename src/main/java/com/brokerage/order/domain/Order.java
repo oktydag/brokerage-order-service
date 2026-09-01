@@ -3,6 +3,8 @@ package com.brokerage.order.domain;
 import com.brokerage.common.domain.Amount;
 import com.brokerage.common.domain.AssetName;
 import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.Reservation;
+import com.brokerage.common.domain.Settlement;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;

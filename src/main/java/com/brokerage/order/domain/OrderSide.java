@@ -1,6 +1,7 @@
 package com.brokerage.order.domain;
 
 import com.brokerage.common.domain.AssetName;
+import com.brokerage.common.domain.Reservation;
 
 public enum OrderSide {
 

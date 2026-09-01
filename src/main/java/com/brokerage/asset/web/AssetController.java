@@ -1,8 +1,8 @@
 package com.brokerage.asset.web;
 
-import com.brokerage.asset.application.AssetQuery;
-import com.brokerage.asset.application.AssetQueryService;
 import com.brokerage.asset.application.AssetView;
+import com.brokerage.asset.application.query.ListAssetsHandler;
+import com.brokerage.asset.application.query.ListAssetsQuery;
 import com.brokerage.common.domain.AssetName;
 import com.brokerage.common.domain.CustomerId;
 import com.brokerage.common.web.PageResponse;
@@ -22,11 +22,11 @@ import org.springframework.web.bind.annotation.RestController;
 @Tag(name = "Assets", description = "Inspect customer holdings")
 public class AssetController {
 
-    private final AssetQueryService queries;
+    private final ListAssetsHandler listAssets;
     private final AccessPolicy accessPolicy;
 
-    public AssetController(AssetQueryService queries, AccessPolicy accessPolicy) {
-        this.queries = queries;
+    public AssetController(ListAssetsHandler listAssets, AccessPolicy accessPolicy) {
+        this.listAssets = listAssets;
         this.accessPolicy = accessPolicy;
     }
 
@@ -41,9 +41,10 @@ public class AssetController {
         CustomerId target = accessPolicy.currentScope()
                 .resolveTarget(CustomerId.ofNullable(customerId));
 
-        return queries.list(new AssetQuery(
+        return listAssets.handle(new ListAssetsQuery(
                 target,
                 assetName == null ? null : AssetName.of(assetName),
-                nonZeroOnly), pageable);
+                nonZeroOnly,
+                pageable));
     }
 }

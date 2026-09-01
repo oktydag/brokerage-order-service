@@ -1,7 +1,8 @@
 package com.brokerage.matching.web;
 
 import com.brokerage.matching.application.MatchReport;
-import com.brokerage.matching.application.MatchingService;
+import com.brokerage.matching.application.command.MatchOrdersCommand;
+import com.brokerage.matching.application.command.MatchOrdersHandler;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -15,15 +16,15 @@ import org.springframework.web.bind.annotation.RestController;
 @Tag(name = "Matching", description = "Operator-only execution of pending orders")
 public class MatchingController {
 
-    private final MatchingService matching;
+    private final MatchOrdersHandler matchOrders;
 
-    public MatchingController(MatchingService matching) {
-        this.matching = matching;
+    public MatchingController(MatchOrdersHandler matchOrders) {
+        this.matchOrders = matchOrders;
     }
 
     @PostMapping("/match")
     @Operation(summary = "Match a set of pending orders")
     public MatchReport match(@Valid @RequestBody MatchOrdersRequest request) {
-        return matching.match(request.orderIds());
+        return matchOrders.handle(new MatchOrdersCommand(request.orderIds()));
     }
 }

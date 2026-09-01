@@ -1,15 +1,18 @@
 package com.brokerage.order.web;
 
-import com.brokerage.common.domain.AccessScope;
 import com.brokerage.common.domain.Amount;
 import com.brokerage.common.domain.AssetName;
 import com.brokerage.common.domain.CustomerId;
 import com.brokerage.common.web.PageResponse;
-import com.brokerage.order.application.OrderCommandService;
-import com.brokerage.order.application.OrderQuery;
-import com.brokerage.order.application.OrderQueryService;
 import com.brokerage.order.application.OrderView;
-import com.brokerage.order.application.PlaceOrderCommand;
+import com.brokerage.order.application.command.CancelOrderCommand;
+import com.brokerage.order.application.command.CancelOrderHandler;
+import com.brokerage.order.application.command.PlaceOrderCommand;
+import com.brokerage.order.application.command.PlaceOrderHandler;
+import com.brokerage.order.application.query.GetOrderHandler;
+import com.brokerage.order.application.query.GetOrderQuery;
+import com.brokerage.order.application.query.ListOrdersHandler;
+import com.brokerage.order.application.query.ListOrdersQuery;
 import com.brokerage.order.domain.OrderSide;
 import com.brokerage.order.domain.OrderStatus;
 import com.brokerage.security.AccessPolicy;
@@ -20,7 +23,6 @@ import org.springdoc.core.annotations.ParameterObject;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -43,14 +45,19 @@ import java.util.UUID;
 @Tag(name = "Orders", description = "Submit, list and cancel stock orders")
 public class OrderController {
 
-    private final OrderCommandService commands;
-    private final OrderQueryService queries;
+    private final PlaceOrderHandler placeOrder;
+    private final CancelOrderHandler cancelOrder;
+    private final ListOrdersHandler listOrders;
+    private final GetOrderHandler getOrder;
     private final AccessPolicy accessPolicy;
 
-    public OrderController(OrderCommandService commands, OrderQueryService queries,
+    public OrderController(PlaceOrderHandler placeOrder, CancelOrderHandler cancelOrder,
+                           ListOrdersHandler listOrders, GetOrderHandler getOrder,
                            AccessPolicy accessPolicy) {
-        this.commands = commands;
-        this.queries = queries;
+        this.placeOrder = placeOrder;
+        this.cancelOrder = cancelOrder;
+        this.listOrders = listOrders;
+        this.getOrder = getOrder;
         this.accessPolicy = accessPolicy;
     }
 
@@ -61,7 +68,7 @@ public class OrderController {
         CustomerId customerId = accessPolicy.currentScope()
                 .resolveTarget(CustomerId.ofNullable(request.customerId()));
 
-        OrderView order = commands.place(new PlaceOrderCommand(
+        OrderView order = placeOrder.handle(new PlaceOrderCommand(
                 customerId,
                 AssetName.of(request.assetName()),
                 request.orderSide(),
@@ -87,25 +94,25 @@ public class OrderController {
         CustomerId target = accessPolicy.currentScope()
                 .resolveTarget(CustomerId.ofNullable(customerId));
 
-        return queries.list(new OrderQuery(
+        return listOrders.handle(new ListOrdersQuery(
                 target,
                 from,
                 to,
                 status == null ? Set.of() : Set.copyOf(status),
                 assetName == null ? null : AssetName.of(assetName),
-                orderSide), pageable);
+                orderSide,
+                pageable));
     }
 
     @GetMapping("/{orderId}")
     @Operation(summary = "Fetch a single order")
     public OrderView get(@PathVariable UUID orderId) {
-        return queries.get(orderId, accessPolicy.currentScope());
+        return getOrder.handle(new GetOrderQuery(orderId, accessPolicy.currentScope()));
     }
 
     @DeleteMapping("/{orderId}")
     @Operation(summary = "Cancel a pending order")
-    public ResponseEntity<OrderView> cancel(@PathVariable UUID orderId) {
-        AccessScope scope = accessPolicy.currentScope();
-        return ResponseEntity.status(HttpStatus.OK).body(commands.cancel(orderId, scope));
+    public OrderView cancel(@PathVariable UUID orderId) {
+        return cancelOrder.handle(new CancelOrderCommand(orderId, accessPolicy.currentScope()));
     }
 }

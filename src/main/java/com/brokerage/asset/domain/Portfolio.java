@@ -3,6 +3,8 @@ package com.brokerage.asset.domain;
 import com.brokerage.common.domain.Amount;
 import com.brokerage.common.domain.AssetName;
 import com.brokerage.common.domain.CustomerId;
+import com.brokerage.common.domain.Reservation;
+import com.brokerage.common.domain.Settlement;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,20 +31,19 @@ public final class Portfolio {
         return new Portfolio(customerId, List.of());
     }
 
-    public void reserve(AssetName assetName, Amount amount) {
-        require(assetName).reserve(amount);
+    public void reserve(Reservation reservation) {
+        require(reservation.assetName()).reserve(reservation.amount());
     }
 
-    public void release(AssetName assetName, Amount amount) {
-        require(assetName).release(amount);
+    public void release(Reservation reservation) {
+        require(reservation.assetName()).release(reservation.amount());
     }
 
-    public void settleOutgoing(AssetName assetName, Amount amount) {
-        require(assetName).debit(amount);
-    }
-
-    public void settleIncoming(AssetName assetName, Amount amount) {
-        holdingOrOpen(assetName).credit(amount);
+    public void settle(Settlement settlement) {
+        Reservation outgoing = settlement.outgoing();
+        Reservation incoming = settlement.incoming();
+        require(outgoing.assetName()).debit(outgoing.amount());
+        holdingOrOpen(incoming.assetName()).credit(incoming.amount());
     }
 
     public void deposit(AssetName assetName, Amount amount) {

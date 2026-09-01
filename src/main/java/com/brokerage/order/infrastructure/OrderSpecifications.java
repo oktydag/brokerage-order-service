@@ -1,6 +1,6 @@
 package com.brokerage.order.infrastructure;
 
-import com.brokerage.order.application.OrderQuery;
+import com.brokerage.order.application.query.ListOrdersQuery;
 import com.brokerage.order.domain.Order;
 import jakarta.persistence.criteria.Predicate;
 import org.springframework.data.jpa.domain.Specification;
@@ -13,7 +13,7 @@ public final class OrderSpecifications {
     private OrderSpecifications() {
     }
 
-    public static Specification<Order> matching(OrderQuery query) {
+    public static Specification<Order> matching(ListOrdersQuery query) {
         return (root, criteriaQuery, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
             predicates.add(cb.equal(root.get("customerId"), query.customerId()));

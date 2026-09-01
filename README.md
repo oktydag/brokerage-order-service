@@ -246,9 +246,36 @@ broker later changes the publisher, not the domain.
 
 ### CQRS at the code level only
 
-Commands and queries are separated in code — `OrderCommandService` / `OrderQueryService`, and
-distinct repositories per side. Query paths run in `readOnly` transactions, which disables
-Hibernate dirty-check snapshotting on listing endpoints.
+Every command and every query is a record, handled by exactly one class implementing
+`CommandHandler<C, R>` or `QueryHandler<Q, R>`. Adding an operation means adding a command or
+query and its handler; nothing existing is edited, so handlers stay small and single-purpose
+instead of accumulating into a service that does everything.
+
+| Command | Handler |
+|---|---|
+| `PlaceOrderCommand` | `PlaceOrderHandler` |
+| `CancelOrderCommand` | `CancelOrderHandler` |
+| `MatchOrderCommand` | `MatchOrderHandler` |
+| `MatchOrdersCommand` | `MatchOrdersHandler` |
+
+| Query | Handler |
+|---|---|
+| `ListOrdersQuery` | `ListOrdersHandler` |
+| `GetOrderQuery` | `GetOrderHandler` |
+| `ListAssetsQuery` | `ListAssetsHandler` |
+
+Handlers are injected directly rather than dispatched through a bus. Direct injection keeps
+the call type-safe and traceable in an IDE; a `CommandBus` resolving handlers by generic type
+is a single class to add later if cross-cutting behaviour ever needs one place to live.
+
+Command and query sides use distinct repositories, and query handlers run in `readOnly`
+transactions, which disables Hibernate dirty-check snapshotting on listing endpoints.
+
+A handler contains no business rules. It loads aggregates, calls them, saves and publishes —
+nothing more. There is no domain service between the handler and the model: `Order` decides
+what an order reserves and which lifecycle transitions are legal, and `Portfolio` decides how
+a balance moves. `portfolio.reserve(order.reservation())` is the whole of order placement's
+balance logic, and both halves of it live in the domain.
 
 They are **not** separated in infrastructure. A single database serves both, because read and
 write shapes here are near-identical (`List Orders` is the order table; `List Assets` is the
@@ -386,22 +413,28 @@ evaluation scale.
 ```
 com.brokerage
 ├── common
-│   ├── domain          Amount, CustomerId, AssetName, AccessScope, exception base
+│   ├── domain          Amount, CustomerId, AssetName, Reservation, Settlement,
+│   │                   AccessScope, exception base
+│   ├── application     CommandHandler, QueryHandler
 │   ├── jpa             Value-object attribute converters
 │   ├── web             RFC 7807 handling, pagination envelope
 │   └── config          Clock, OpenAPI, demo-data seeding
 ├── asset
 │   ├── domain          Portfolio (aggregate root), Asset, PortfolioRepository
-│   ├── application     AssetQueryService, read models
+│   ├── application
+│   │   └── query       ListAssetsQuery + handler, read model
 │   ├── infrastructure  JPA repositories, locking, specifications
 │   └── web             AssetController
 ├── order
-│   ├── domain          Order (aggregate root), OrderSide, Reservation, Settlement, events
-│   ├── application     OrderCommandService, OrderQueryService, commands, read models
+│   ├── domain          Order (aggregate root), OrderSide, lifecycle, events
+│   ├── application
+│   │   ├── command     PlaceOrder, CancelOrder + handlers
+│   │   └── query       ListOrders, GetOrder + handlers
 │   ├── infrastructure  Query repository, specifications
 │   └── web             OrderController
 ├── matching
-│   ├── application     MatchingService, OrderMatcher, per-order report
+│   ├── application
+│   │   └── command     MatchOrder, MatchOrders + handlers, per-order report
 │   └── web             MatchingController
 └── security            AccessPolicy, principal, user store, filter chain
 ```

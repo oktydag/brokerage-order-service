@@ -1,4 +1,4 @@
-package com.brokerage.order.application;
+package com.brokerage.order.application.command;
 
 import com.brokerage.common.domain.Amount;
 import com.brokerage.common.domain.AssetName;
