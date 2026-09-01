@@ -3,12 +3,14 @@ package com.brokerage.order.web;
 import com.brokerage.common.domain.valueobjects.Amount;
 import com.brokerage.common.domain.valueobjects.AssetName;
 import com.brokerage.common.domain.valueobjects.CustomerId;
+import com.brokerage.common.domain.valueobjects.IdempotencyKey;
 import com.brokerage.common.web.PageResponse;
 import com.brokerage.order.application.OrderView;
 import com.brokerage.order.application.command.CancelOrderCommand;
 import com.brokerage.order.application.command.CancelOrderHandler;
 import com.brokerage.order.application.command.PlaceOrderCommand;
 import com.brokerage.order.application.command.PlaceOrderHandler;
+import com.brokerage.order.application.command.PlaceOrderResult;
 import com.brokerage.order.application.query.GetOrderHandler;
 import com.brokerage.order.application.query.GetOrderQuery;
 import com.brokerage.order.application.query.ListOrdersHandler;
@@ -23,12 +25,14 @@ import org.springdoc.core.annotations.ParameterObject;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -44,6 +48,9 @@ import java.util.UUID;
 @RequestMapping("/api/v1/orders")
 @Tag(name = "Orders", description = "Submit, list and cancel stock orders")
 public class OrderController {
+
+    public static final String IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+    public static final String IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
 
     private final PlaceOrderHandler placeOrder;
     private final CancelOrderHandler cancelOrder;
@@ -63,20 +70,30 @@ public class OrderController {
 
     @PostMapping
     @Operation(summary = "Create a new order")
-    public ResponseEntity<OrderView> place(@Valid @RequestBody PlaceOrderRequest request,
-                                           UriComponentsBuilder uriBuilder) {
+    public ResponseEntity<OrderView> place(
+            @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey,
+            @Valid @RequestBody PlaceOrderRequest request,
+            UriComponentsBuilder uriBuilder) {
+
         CustomerId customerId = accessPolicy.currentScope()
                 .resolveTarget(CustomerId.ofNullable(request.customerId()));
 
-        OrderView order = placeOrder.handle(new PlaceOrderCommand(
+        PlaceOrderResult result = placeOrder.handle(new PlaceOrderCommand(
                 customerId,
                 AssetName.of(request.assetName()),
                 request.orderSide(),
                 Amount.of(request.size()),
-                Amount.of(request.price())));
+                Amount.of(request.price()),
+                IdempotencyKey.ofNullable(idempotencyKey)));
 
-        URI location = uriBuilder.path("/api/v1/orders/{id}").buildAndExpand(order.id()).toUri();
-        return ResponseEntity.created(location).body(order);
+        URI location = uriBuilder.path("/api/v1/orders/{id}")
+                .buildAndExpand(result.order().id()).toUri();
+
+        return ResponseEntity
+                .status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
+                .location(location)
+                .header(IDEMPOTENCY_REPLAYED_HEADER, String.valueOf(result.replayed()))
+                .body(result.order());
     }
 
     @GetMapping

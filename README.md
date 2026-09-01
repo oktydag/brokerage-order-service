@@ -16,6 +16,7 @@ Built with **Java 25** and **Spring Boot 3.5**, persisting to an in-memory **H2*
 - [The domain in one rule](#the-domain-in-one-rule)
 - [Architecture](#architecture)
 - [Concurrency](#concurrency)
+- [Idempotency](#idempotency)
 - [Error model](#error-model)
 - [Trade-offs and known limitations](#trade-offs-and-known-limitations)
 - [Project layout](#project-layout)
@@ -117,8 +118,9 @@ optional; omitting one leaves that side unbounded.
 curl -u admin:admin123 -X DELETE http://localhost:8080/api/v1/orders/{orderId}
 ```
 
-Only `PENDING` orders may be cancelled; anything else is refused with `409`. The reservation
-returns to the customer's usable balance.
+Releases the reservation back to the customer's usable balance. Cancelling an order that is
+already `CANCELED` returns `200` and the same view — a retried cancellation converges rather
+than failing. Only a `MATCHED` order is refused, with `409`.
 
 ### List assets
 
@@ -143,15 +145,20 @@ not abort the batch; the response reports the outcome per order:
 
 ```json
 {
-  "requested": 2,
+  "requested": 3,
   "matched": 1,
+  "alreadyMatched": 1,
   "rejected": 1,
   "outcomes": [
     { "orderId": "…", "result": "MATCHED" },
+    { "orderId": "…", "result": "ALREADY_MATCHED" },
     { "orderId": "…", "result": "REJECTED", "code": "ILLEGAL_ORDER_TRANSITION",
       "message": "Order … is CANCELED and cannot become MATCHED" }
   ]
 }
+
+Re-sending a batch is safe: orders already executed come back as `ALREADY_MATCHED` and are not
+settled twice.
 ```
 
 ---
@@ -329,6 +336,75 @@ blocking JDBC calls a poor fit for virtual threads.
 
 ---
 
+## Idempotency
+
+Networks lose responses. A client that times out on `POST /orders` cannot tell whether the
+order was created, and the API already tells clients to retry on a lock conflict — so retrying
+has to be safe by construction, not by luck.
+
+Three of the four write paths are idempotent for free, because the client names the resource
+and the lifecycle converges on a terminal state:
+
+| Endpoint | Retry behaviour |
+|---|---|
+| `DELETE /orders/{id}` | Already `CANCELED` → `200`, same view. Only `MATCHED` conflicts (`409`) |
+| `POST /admin/orders/match` | Already `MATCHED` → `ALREADY_MATCHED`, never settled twice |
+| `POST /orders` | Needs an idempotency key — it *creates* the identity |
+
+### Idempotency keys
+
+Send a client-generated key with the placement request:
+
+```bash
+curl -u admin:admin123 -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 3f9a1c7e-2b44-4c0f-9a6d-8e1b5c2d7f01' \
+  -X POST http://localhost:8080/api/v1/orders \
+  -d '{"customerId":"CUST-1001","assetName":"THYAO","orderSide":"BUY","size":100,"price":300}'
+```
+
+| Situation | Response |
+|---|---|
+| First request | `201`, `Idempotency-Replayed: false` |
+| Retry, same payload | `200`, `Idempotency-Replayed: true`, the original order |
+| Same key, different payload | `422 IDEMPOTENCY_KEY_REUSE` |
+| No key sent | Not deduplicated — every request creates an order |
+
+The claim row is written **inside the placement transaction**, against
+`UNIQUE (customer_id, idempotency_key)`. That single constraint carries the whole design:
+
+- The claim and the order commit together, so there is never an orphaned claim pointing at an
+  order that does not exist, nor an order without its claim.
+- A concurrent duplicate blocks on the unique index until the first request commits, then fails
+  and replays the stored result. No `IN_PROGRESS` state is needed, and therefore no reaper for
+  claims left behind by a crashed process.
+- If placement fails, the claim rolls back with it, so a genuine retry after a rejected order
+  is free to execute.
+
+Verified: ten simultaneous requests carrying the same key produce one `201`, nine `200`s, a
+single order and a single reservation.
+
+### Fingerprints
+
+The stored fingerprint is a SHA-256 over the *normalised domain values* — customer, asset,
+side, and the amounts as `Amount` renders them — not over the raw request body. Hashing the
+body would make `100` and `100.00` different requests and reject a legitimate retry, since
+`Amount` treats them as the same quantity.
+
+### What is deliberately not cached
+
+Only successful placements are recorded. A rejected order committed nothing, so re-running it
+is harmless and produces the same rejection. Caching failures would mean writing the claim in
+its own transaction and reaping the ones left behind by crashes — real cost, no benefit at this
+scale.
+
+### Retention
+
+Claims are purged after `app.idempotency.retention` (default 24 hours) by a scheduled job. The
+retention window is exactly how long a retry stays safe, so it is a contract with clients, not
+a housekeeping detail.
+
+---
+
 ## Error model
 
 All errors are RFC 7807 `application/problem+json` with a stable machine-readable `code`.
@@ -339,8 +415,8 @@ Status codes are chosen to tell the client what to do next:
 | `400` | The request is malformed | `VALIDATION_FAILED`, `INVALID_ORDER` |
 | `401` / `403` | Not authenticated / out of scope | `UNAUTHENTICATED`, `FORBIDDEN` |
 | `404` | No such record | `ORDER_NOT_FOUND` |
-| `409` | Valid request, resource moved on — a retry may work | `ILLEGAL_ORDER_TRANSITION`, `CONCURRENT_MODIFICATION` |
-| `422` | Understood and permanently refused by a business rule | `INSUFFICIENT_USABLE_BALANCE` |
+| `409` | Valid request, resource moved on — a retry may work | `ILLEGAL_ORDER_TRANSITION`, `CONCURRENT_MODIFICATION`, `DUPLICATE_REQUEST` |
+| `422` | Understood and permanently refused by a business rule | `INSUFFICIENT_USABLE_BALANCE`, `IDEMPOTENCY_KEY_REUSE` |
 
 ```json
 {
@@ -425,8 +501,10 @@ com.brokerage
 ├── common
 │   ├── domain
 │   │   └── valueobjects  Amount, CustomerId, AssetName, Reservation,
-│   │                     Settlement, AccessScope
+│   │                     Settlement, AccessScope, IdempotencyKey,
+│   │                     RequestFingerprint
 │   ├── application     CommandHandler, QueryHandler
+│   ├── idempotency     Claim record, repository, retention cleaner
 │   ├── jpa             Value-object attribute converters
 │   ├── web             RFC 7807 handling, pagination envelope
 │   └── config          Clock, OpenAPI, demo-data seeding
@@ -440,7 +518,8 @@ com.brokerage
 │   ├── domain          Order (aggregate root), repository, events
 │   │   └── valueobjects  OrderSide, OrderStatus
 │   ├── application
-│   │   ├── command     PlaceOrder, CancelOrder + handlers
+│   │   ├── command     PlaceOrder, CancelOrder + handlers, placement,
+│   │   │               idempotency policy
 │   │   └── query       ListOrders, GetOrder + handlers
 │   ├── infrastructure  Query repository, specifications
 │   └── web             OrderController

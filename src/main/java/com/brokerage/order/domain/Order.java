@@ -16,6 +16,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 @Entity
@@ -84,14 +85,22 @@ public class Order {
         return new Order(customerId, assetName, orderSide, size, price, createDate);
     }
 
-    public void cancel() {
+    public Optional<Reservation> cancel() {
+        if (status == OrderStatus.CANCELED) {
+            return Optional.empty();
+        }
         requirePending(OrderStatus.CANCELED);
         status = OrderStatus.CANCELED;
+        return Optional.of(reservation());
     }
 
-    public void match() {
+    public Optional<Settlement> match() {
+        if (status == OrderStatus.MATCHED) {
+            return Optional.empty();
+        }
         requirePending(OrderStatus.MATCHED);
         status = OrderStatus.MATCHED;
+        return Optional.of(settlement());
     }
 
     public Amount totalValue() {

@@ -34,10 +34,10 @@ public class CancelOrderHandler implements CommandHandler<CancelOrderCommand, Or
         command.scope().assertCovers(order.getCustomerId());
 
         Portfolio portfolio = portfolios.lockForUpdate(order.getCustomerId());
-        order.cancel();
-        portfolio.release(order.reservation());
-
-        events.publishEvent(OrderCanceled.of(order));
+        order.cancel().ifPresent(reservation -> {
+            portfolio.release(reservation);
+            events.publishEvent(OrderCanceled.of(order));
+        });
         return OrderView.from(order);
     }
 }

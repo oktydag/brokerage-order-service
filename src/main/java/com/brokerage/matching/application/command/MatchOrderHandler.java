@@ -3,6 +3,7 @@ package com.brokerage.matching.application.command;
 import com.brokerage.asset.domain.Portfolio;
 import com.brokerage.asset.domain.PortfolioRepository;
 import com.brokerage.common.application.CommandHandler;
+import com.brokerage.common.domain.valueobjects.Settlement;
 import com.brokerage.order.application.OrderView;
 import com.brokerage.order.domain.Order;
 import com.brokerage.order.domain.OrderNotFoundException;
@@ -13,8 +14,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Optional;
+
 @Component
-public class MatchOrderHandler implements CommandHandler<MatchOrderCommand, OrderView> {
+public class MatchOrderHandler implements CommandHandler<MatchOrderCommand, MatchOrderResult> {
 
     private final OrderRepository orders;
     private final PortfolioRepository portfolios;
@@ -29,16 +32,18 @@ public class MatchOrderHandler implements CommandHandler<MatchOrderCommand, Orde
 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public OrderView handle(MatchOrderCommand command) {
+    public MatchOrderResult handle(MatchOrderCommand command) {
         Order order = orders.findByIdForUpdate(command.orderId())
                 .orElseThrow(() -> new OrderNotFoundException(command.orderId()));
 
         Portfolio portfolio = portfolios.lockForUpdate(order.getCustomerId());
-        order.match();
-        portfolio.settle(order.settlement());
-        portfolios.save(portfolio);
+        Optional<Settlement> settlement = order.match();
+        settlement.ifPresent(applied -> {
+            portfolio.settle(applied);
+            portfolios.save(portfolio);
+            events.publishEvent(OrderMatched.of(order));
+        });
 
-        events.publishEvent(OrderMatched.of(order));
-        return OrderView.from(order);
+        return new MatchOrderResult(OrderView.from(order), settlement.isPresent());
     }
 }

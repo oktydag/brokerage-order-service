@@ -6,14 +6,21 @@ public record MatchOutcome(UUID orderId, Result result, String code, String mess
 
     public enum Result {
         MATCHED,
+        ALREADY_MATCHED,
         REJECTED
     }
 
-    public static MatchOutcome matched(UUID orderId) {
-        return new MatchOutcome(orderId, Result.MATCHED, null, null);
+    public static MatchOutcome of(UUID orderId, boolean applied) {
+        return applied
+                ? new MatchOutcome(orderId, Result.MATCHED, null, null)
+                : new MatchOutcome(orderId, Result.ALREADY_MATCHED, null, null);
     }
 
     public static MatchOutcome rejected(UUID orderId, String code, String message) {
         return new MatchOutcome(orderId, Result.REJECTED, code, message);
+    }
+
+    public boolean isRejected() {
+        return result == Result.REJECTED;
     }
 }

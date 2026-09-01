@@ -4,6 +4,8 @@ import com.brokerage.asset.domain.AssetNotHeldException;
 import com.brokerage.asset.domain.InsufficientUsableBalanceException;
 import com.brokerage.common.domain.ForbiddenException;
 import com.brokerage.common.domain.InvariantViolationException;
+import com.brokerage.common.idempotency.DuplicateRequestException;
+import com.brokerage.common.idempotency.IdempotencyKeyReuseException;
 import com.brokerage.order.domain.IllegalOrderTransitionException;
 import com.brokerage.order.domain.InvalidOrderException;
 import com.brokerage.order.domain.OrderNotFoundException;
@@ -65,6 +67,16 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ForbiddenException.class)
     ProblemDetail handleForbidden(ForbiddenException e) {
         return ProblemDetails.of(HttpStatus.FORBIDDEN, e.code(), e.getMessage());
+    }
+
+    @ExceptionHandler(IdempotencyKeyReuseException.class)
+    ProblemDetail handleIdempotencyKeyReuse(IdempotencyKeyReuseException e) {
+        return ProblemDetails.of(HttpStatus.UNPROCESSABLE_ENTITY, e.code(), e.getMessage());
+    }
+
+    @ExceptionHandler(DuplicateRequestException.class)
+    ProblemDetail handleDuplicateRequest(DuplicateRequestException e) {
+        return ProblemDetails.of(HttpStatus.CONFLICT, e.code(), e.getMessage());
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

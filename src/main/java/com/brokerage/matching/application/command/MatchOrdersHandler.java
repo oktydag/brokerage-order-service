@@ -43,8 +43,7 @@ public class MatchOrdersHandler implements CommandHandler<MatchOrdersCommand, Ma
 
     private MatchOutcome matchOne(UUID orderId) {
         try {
-            matchOrder.handle(new MatchOrderCommand(orderId));
-            return MatchOutcome.matched(orderId);
+            return MatchOutcome.of(orderId, matchOrder.handle(new MatchOrderCommand(orderId)).applied());
         } catch (DomainException e) {
             return MatchOutcome.rejected(orderId, e.code(), e.getMessage());
         } catch (RuntimeException e) {

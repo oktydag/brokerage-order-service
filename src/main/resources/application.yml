@@ -60,6 +60,10 @@ logging:
     com.brokerage: INFO
 
 app:
+  idempotency:
+    retention: P1D
+    cleanup-interval: PT1H
+
   demo-data:
     enabled: true
     users:
