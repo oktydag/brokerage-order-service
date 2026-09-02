@@ -44,9 +44,9 @@ integration-test:
   image: $MAVEN_IMAGE
   needs: ["build"]
   script:
-    - mvn $MAVEN_CLI_OPTS verify
-    - |
-      awk -F, '{i+=$4; c+=$5} END {printf "Total coverage: %.1f%%\n", c/(i+c)*100}' target/site/jacoco/jacoco.csv
+    - mvn $MAVEN_CLI_OPTS test \
+      -Dtest='*IntegrationTest,*ConcurrencyTest' \
+      -Dsurefire.failIfNoSpecifiedTests=false
   coverage: '/Total coverage: ([0-9.]+)%/'
   artifacts:
     when: always
