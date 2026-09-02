@@ -21,6 +21,9 @@ Built with **Java 25** and **Spring Boot 3.5**, persisting to an in-memory **H2*
 - [Security](#security)
 - [Error model](#error-model)
 - [Testing strategy](#testing-strategy)
+- [Build and deployment](#build-and-deployment)
+- [Known limitations](#known-limitations)
+- [AI-assisted development](#ai-assisted-development)
 - [Known limitations](#known-limitations)
 
 ---
@@ -66,6 +69,16 @@ JaCoCo fails the build below 90% instruction coverage. The report lands in
 ```bash
 java -jar target/brokerage-order-service-1.0.0.jar
 ```
+
+### Run in Docker
+
+```bash
+docker compose up --build
+```
+
+The service comes up on the same port with the same demo data. Compose passes a container
+healthcheck against `/actuator/health/readiness`, so `docker compose ps` shows `healthy` only
+once the application is actually serving.
 
 ### Disable the seed data
 
@@ -281,15 +294,6 @@ domain service** between the application handler and the model: a handler loads 
 calls them, saves and publishes, and nothing else. None of the four command handlers contains a
 conditional, which is the check that no rule has leaked upward.
 
-`portfolio.reserve(order.reservation())` is the whole of placement's balance logic, and both
-halves live in the domain. A rule that fits neither `Order` nor `Portfolio` is a signal that the
-aggregate boundary is wrong, not that a third class is needed.
-
-Value objects are collected in a `valueobjects` package under each domain, leaving entities and
-aggregate roots in the domain package itself, so what has identity and what does not is readable
-from the directory tree. The specification's vocabulary is kept verbatim: `usableSize`, `size`,
-`orderSide`, `createDate`, `PENDING` / `MATCHED` / `CANCELED`.
-
 Strategic DDD is deliberately absent — there is one bounded context, and context-mapping
 ceremony over a single context would be decoration.
 
@@ -326,12 +330,7 @@ Java 25 on Spring Boot 3.5.x. Boot 4.x is available and targets Java 25, but bri
 and Spring Security 7 migration with it, which buys nothing for a service of this size.
 
 Virtual threads are enabled (`spring.threads.virtual.enabled`). This is safe here because Java
-24 and later removed, via [JEP 491](https://openjdk.org/jeps/491), the carrier-thread pinning
-that used to make blocking JDBC calls a poor fit; on an older JDK the setting would have to come
-back off.
-
-One version constraint is worth recording: springdoc must be 2.8.x or newer. Version 2.6.0
-compiles cleanly but fails at runtime against Spring Framework 6.2 with a `NoSuchMethodError`.
+24 and later removed.
 
 ### Project layout
 
@@ -563,29 +562,84 @@ execution order or on the demo seed, and assertions go through the aggregate to 
 rather than stopping at the response body — which is what catches a balance that moved when it
 should not have.
 
-| File | Covers |
-|---|---|
-| [`src/test/java/com/brokerage/order/web/OrderApiIntegrationTest.java`](src/test/java/com/brokerage/order/web/OrderApiIntegrationTest.java) | Placement reserving the right leg, overdraft refusal, currency rejection, field-level validation, half-open date range, status/asset/side filters, fetch by id, cancellation and its retry |
-| [`src/test/java/com/brokerage/order/web/IdempotencyIntegrationTest.java`](src/test/java/com/brokerage/order/web/IdempotencyIntegrationTest.java) | Replay headers and status codes, amount normalisation, key reuse rejection, per-customer key scoping, behaviour without a key, no claim left behind by a rejected order |
-| [`src/test/java/com/brokerage/asset/web/AssetApiIntegrationTest.java`](src/test/java/com/brokerage/asset/web/AssetApiIntegrationTest.java) | Holdings listing, asset-name filter, `nonZeroOnly`, reserved amount reported after a pending order |
-| [`src/test/java/com/brokerage/matching/web/MatchingApiIntegrationTest.java`](src/test/java/com/brokerage/matching/web/MatchingApiIntegrationTest.java) | Both legs of a BUY and a SELL settling, retried batch reporting `ALREADY_MATCHED`, one rejection not aborting the batch, empty batch validation, unknown order reported rather than thrown |
-| [`src/test/java/com/brokerage/security/web/SecurityIntegrationTest.java`](src/test/java/com/brokerage/security/web/SecurityIntegrationTest.java) | Anonymous challenge, bad credentials, public API docs, customer confined to their own holdings and orders, operator endpoint restricted to `ADMIN` |
-| [`src/test/java/com/brokerage/common/idempotency/IdempotencyRetentionIntegrationTest.java`](src/test/java/com/brokerage/common/idempotency/IdempotencyRetentionIntegrationTest.java) | A claim inside the retention window survives a purge; one beyond it is removed |
-
 ### Concurrency tests
 
 Real threads, real transactions, released together from a common start line by
 `src/test/java/com/brokerage/support/ConcurrentRuns.java`.
 
-| File | Setup | Assertion |
+---
+
+## Build and deployment
+
+### Health endpoints
+
+Actuator exposes `health` and `info` only. Three paths are reachable without authentication
+because container and cluster probes need them; everything else under `/actuator` requires an
+authenticated `ADMIN`:
+
+| Path | Used by |
+|---|---|
+| `/actuator/health` | Humans and the Docker healthcheck |
+| `/actuator/health/liveness` | Kubernetes `startupProbe` and `livenessProbe` |
+| `/actuator/health/readiness` | Kubernetes `readinessProbe`, Compose healthcheck |
+
+`show-details` is `never`, so the probes report status without leaking component detail.
+
+### Container image
+
+A two-stage `Dockerfile`: Maven on Temurin 25 builds the jar, `eclipse-temurin:25-jre-alpine`
+runs it. The runtime layer is hardened for the cluster's `runAsNonRoot` policy:
+
+- runs as **numeric** UID/GID `10001:10001` — a named user would make kubelet unable to verify
+  the image is non-root and the pod would fail to start
+- `JAVA_OPTS` defaults to `-XX:MaxRAMPercentage=75.0`, so the heap follows the container limit
+  rather than the host's memory
+- `exec java …` as the entrypoint, so the JVM is PID 1's child and receives `SIGTERM` directly
+
+### Pipeline
+
+`.gitlab-ci.yml`, five stages:
+
+| Stage | Job | What runs |
 |---|---|---|
-| [`src/test/java/com/brokerage/concurrency/OrderPlacementConcurrencyTest.java`](src/test/java/com/brokerage/concurrency/OrderPlacementConcurrencyTest.java) | 20 simultaneous BUYs of 10 000 TRY against a 75 000 TRY balance | exactly 7 accepted, 13 refused, `usableSize` exactly 5 000, `size` untouched |
-| ″ | 20 simultaneous SELLs against a 250-share holding | exactly 2 accepted; `0 ≤ usableSize ≤ size` holds throughout |
-| [`src/test/java/com/brokerage/concurrency/IdempotencyConcurrencyTest.java`](src/test/java/com/brokerage/concurrency/IdempotencyConcurrencyTest.java) | 20 simultaneous requests sharing one key | one order, one reservation, exactly one non-replayed response |
-| ″ | 5 simultaneous requests with distinct keys | five orders, five reservations |
-| [`src/test/java/com/brokerage/concurrency/OrderLifecycleConcurrencyTest.java`](src/test/java/com/brokerage/concurrency/OrderLifecycleConcurrencyTest.java) | 16 simultaneous cancellations of one order | all succeed, reservation released exactly once |
-| ″ | 16 simultaneous matches of one order | exactly one settlement applied |
-| ″ | cancellations racing matches on one order | one terminal state, balances consistent with it |
+| `build` | `build` | `mvn compile` |
+| `unit-test` | `unit-test` | Unit tests only, via `-Dtest='!*IntegrationTest,!*ConcurrencyTest'` |
+| `integration-test` | `integration-test` | `mvn verify` — the full suite plus the 90% JaCoCo gate, with the total reported back to GitLab as the pipeline coverage figure |
+| `package` | `build-image` | Builds and pushes the image, tagged with the commit SHA, plus `latest` on the default branch |
+| `deploy` | `deploy-stage`, `deploy-production` | `kustomize edit set image` then `kubectl apply -k`, waiting on `kubectl rollout status` |
+
+The image is built **after** the tests pass, so a failing build never publishes an artifact.
+Stage deploys automatically on the default branch; production is the same job gated behind a
+manual trigger.
+
+### Kubernetes
+
+`.deploy` is a Kustomize tree — a `base` plus a `stage` and a `production` overlay:
+
+```
+.deploy
+├── base                 ServiceAccount, ConfigMap, Secret, Deployment, Service
+└── overlays
+    ├── stage            namespace brokerage-stage, ingress, 1 replica, DEBUG logging
+    └── production       namespace brokerage-production, ingress, 2 replicas,
+                         HPA (2–6 pods on CPU/memory), pod anti-affinity
+```
+
+```bash
+kubectl apply -k .deploy/overlays/stage
+```
+
+The deployment runs read-only-rootfs with all capabilities dropped, `RuntimeDefault` seccomp and
+an `emptyDir` mounted at `/tmp` for the JVM's temporary directory. Rollouts are surge-only
+(`maxUnavailable: 0`), and a `preStop` sleep plus a 40-second grace period give the ingress time
+to stop routing before the JVM shuts down.
+
+**Before a real deployment**, three placeholders have to change: the image registry in each
+overlay's `kustomization.yaml`, the ingress hostnames, and the `CHANGEME` values in the Secret.
+The manifests deploy the service exactly as the exercise specifies it — in-memory H2 and
+config-seeded demo credentials — so they are runnable and honest rather than implying a database
+tier the application does not have. Wiring a real datastore means adding the JDBC driver, adding
+`SPRING_DATASOURCE_*` to the Secret, and pointing Flyway at it; nothing in the code assumes H2.
 
 ---
 
@@ -617,10 +671,16 @@ under [Commands and queries](#commands-and-queries) is documented, not implement
 would be unexercised complexity at evaluation scale.
 
 **Persistence is in-memory.** H2 with `DB_CLOSE_DELAY=-1`, as the specification allows. Nothing
-in the code depends on H2 specifically.
+in the code depends on H2 specifically, but it does mean a restarted pod starts with an empty
+book, and that two replicas do not share state. The production overlay's replica count and HPA
+are therefore aspirational until a shared datastore is wired in.
 
+**No PodDisruptionBudget.** Voluntary disruptions can take the last pod down. Worth adding
+alongside the HPA once the service is genuinely stateless behind a shared database.
 
-## AI-Assisted Development
+---
+
+## AI-assisted development
 
 AI coding tools were used throughout the development of this project as an
 engineering assistant.

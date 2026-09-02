@@ -1,0 +1,109 @@
+stages:
+  - build
+  - unit-test
+  - integration-test
+  - package
+  - deploy
+
+variables:
+  MAVEN_IMAGE: maven:3.9.16-eclipse-temurin-25
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  MAVEN_CLI_OPTS: "-B --no-transfer-progress"
+  IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  IMAGE_NAME: registry.example.com/brokerage-order-service
+
+default:
+  cache:
+    key:
+      files:
+        - pom.xml
+    paths:
+      - .m2/repository
+
+build:
+  stage: build
+  image: $MAVEN_IMAGE
+  script:
+    - mvn $MAVEN_CLI_OPTS compile
+
+unit-test:
+  stage: unit-test
+  image: $MAVEN_IMAGE
+  needs: ["build"]
+  script:
+    - mvn $MAVEN_CLI_OPTS test -Dtest='!*IntegrationTest,!*ConcurrencyTest' -Dsurefire.failIfNoSpecifiedTests=false
+  artifacts:
+    when: always
+    reports:
+      junit: target/surefire-reports/TEST-*.xml
+    paths:
+      - target/surefire-reports/
+
+integration-test:
+  stage: integration-test
+  image: $MAVEN_IMAGE
+  needs: ["build"]
+  script:
+    - mvn $MAVEN_CLI_OPTS verify
+    - |
+      awk -F, '{i+=$4; c+=$5} END {printf "Total coverage: %.1f%%\n", c/(i+c)*100}' target/site/jacoco/jacoco.csv
+  coverage: '/Total coverage: ([0-9.]+)%/'
+  artifacts:
+    when: always
+    reports:
+      junit: target/surefire-reports/TEST-*.xml
+    paths:
+      - target/surefire-reports/
+      - target/site/jacoco/
+
+build-image:
+  stage: package
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs: ["unit-test", "integration-test"]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$IMAGE" .
+    - docker push "$IMAGE"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$IMAGE" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
+      fi
+
+.deploy:
+  image: alpine/k8s:1.30.2
+  needs: ["build-image"]
+  script:
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
+    - cd .deploy/overlays/$ENVIRONMENT_NAME
+    - kustomize edit set image "$IMAGE_NAME=$IMAGE"
+    - kubectl apply -k .
+    - kubectl rollout status deployment/brokerage-order-service -n brokerage-$ENVIRONMENT_NAME --timeout=180s
+
+deploy-stage:
+  extends: .deploy
+  stage: deploy
+  variables:
+    ENVIRONMENT_NAME: stage
+    KUBECONFIG_CONTENT: $KUBE_CONFIG_STAGE
+  environment:
+    name: stage
+    url: https://stage.brokerage.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-production:
+  extends: .deploy
+  stage: deploy
+  variables:
+    ENVIRONMENT_NAME: production
+    KUBECONFIG_CONTENT: $KUBE_CONFIG_PRODUCTION
+  environment:
+    name: production
+    url: https://brokerage.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual

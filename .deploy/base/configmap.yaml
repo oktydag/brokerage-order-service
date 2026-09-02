@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: brokerage-order-service-config
+  labels:
+    app.kubernetes.io/name: brokerage-order-service
+data:
+  JAVA_OPTS: "-XX:MaxRAMPercentage=75.0"
+  LOGGING_LEVEL_COM_BROKERAGE: "INFO"
+  APP_DEMODATA_ENABLED: "true"
+  APP_IDEMPOTENCY_RETENTION: "P1D"
+  APP_IDEMPOTENCY_CLEANUPINTERVAL: "PT1H"

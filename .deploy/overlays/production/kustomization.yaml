@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: brokerage-production
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+patches:
+  - path: deployment-patch.yaml
+  - path: secret-patch.yaml
+
+images:
+  - name: registry.example.com/brokerage-order-service
+    newTag: v0.0.1
