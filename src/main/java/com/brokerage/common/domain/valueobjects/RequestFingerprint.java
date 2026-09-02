@@ -18,9 +18,13 @@ public record RequestFingerprint(String value) implements Serializable {
     }
 
     public static RequestFingerprint over(String... parts) {
+        StringBuilder canonical = new StringBuilder();
+        for (String part : parts) {
+            canonical.append(part.length()).append(':').append(part).append(SEPARATOR);
+        }
         try {
             MessageDigest digest = MessageDigest.getInstance(ALGORITHM);
-            byte[] hashed = digest.digest(String.join(SEPARATOR, parts).getBytes(StandardCharsets.UTF_8));
+            byte[] hashed = digest.digest(canonical.toString().getBytes(StandardCharsets.UTF_8));
             return new RequestFingerprint(HexFormat.of().formatHex(hashed));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(ALGORITHM + " is not available", e);

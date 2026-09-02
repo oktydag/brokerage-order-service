@@ -13,13 +13,15 @@ Built with **Java 25** and **Spring Boot 3.5**, persisting to an in-memory **H2*
 - [Quick start](#quick-start)
 - [Demo data](#demo-data)
 - [API](#api)
-- [The domain in one rule](#the-domain-in-one-rule)
 - [Architecture](#architecture)
+- [Architecture decision records](#architecture-decision-records)
+- [The domain in one rule](#the-domain-in-one-rule)
 - [Concurrency](#concurrency)
 - [Idempotency](#idempotency)
+- [Security](#security)
 - [Error model](#error-model)
-- [Trade-offs and known limitations](#trade-offs-and-known-limitations)
-- [Project layout](#project-layout)
+- [Testing strategy](#testing-strategy)
+- [Known limitations](#known-limitations)
 
 ---
 
@@ -49,6 +51,15 @@ The service starts on `http://localhost:8080` with the schema migrated and demo 
 ```bash
 ./mvnw test
 ```
+
+### Test with coverage enforcement
+
+```bash
+./mvnw clean verify
+```
+
+JaCoCo fails the build below 90% instruction coverage. The report lands in
+`target/site/jacoco/index.html`.
 
 ### Run the packaged jar
 
@@ -90,13 +101,15 @@ Opening balances:
 
 ```bash
 curl -u admin:admin123 -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 3f9a1c7e-2b44-4c0f-9a6d-8e1b5c2d7f01' \
   -X POST http://localhost:8080/api/v1/orders \
   -d '{"customerId":"CUST-1001","assetName":"THYAO","orderSide":"BUY","size":100,"price":300}'
 ```
 
 Reserves the required balance and stores the order as `PENDING`. Returns `201` with a
 `Location` header. `customerId` is required for an employee and ignored for a customer
-credential, which may only act on its own account.
+credential, which may only act on its own account. The `Idempotency-Key` header is optional and
+described under [Idempotency](#idempotency).
 
 ### List orders
 
@@ -105,8 +118,8 @@ curl -u admin:admin123 \
   'http://localhost:8080/api/v1/orders?customerId=CUST-1001&from=2026-01-01T00:00:00Z&to=2027-01-01T00:00:00Z'
 ```
 
-Supported filters: `customerId`, `from`, `to`, `status` (repeatable), `assetName`,
-`orderSide`, plus `page`, `size` and `sort`.
+Filters: `customerId`, `from`, `to`, `status` (repeatable), `assetName`, `orderSide`, plus
+`page`, `size` and `sort`.
 
 The date range is half-open — `from` inclusive, `to` exclusive — so consecutive ranges tile
 without overlapping or dropping an order that lands exactly on a boundary. Both bounds are
@@ -119,8 +132,15 @@ curl -u admin:admin123 -X DELETE http://localhost:8080/api/v1/orders/{orderId}
 ```
 
 Releases the reservation back to the customer's usable balance. Cancelling an order that is
-already `CANCELED` returns `200` and the same view — a retried cancellation converges rather
-than failing. Only a `MATCHED` order is refused, with `409`.
+already `CANCELED` returns `200` and the same view; only a `MATCHED` order is refused, with
+`409`.
+
+The order is never deleted. The specification names this endpoint "Delete Order" but describes
+cancellation, and orders are financial records: a deleted row cannot be audited, reconciled, or
+explained to a customer asking what happened to their money. The order survives in `CANCELED`
+status and no row is ever removed. An order that exists but is no longer pending answers `409`
+rather than `404`, because "no such order" and "too late" are different problems for the
+caller.
 
 ### List assets
 
@@ -140,8 +160,8 @@ curl -u admin:admin123 -H 'Content-Type: application/json' \
 ```
 
 Each order transitions `PENDING → MATCHED` and both asset balances are updated to reflect the
-executed trade. Orders are settled **one transaction each**, so a single rejected order does
-not abort the batch; the response reports the outcome per order:
+executed trade. Orders are settled **one transaction each**, so a single rejected order does not
+abort the batch:
 
 ```json
 {
@@ -156,10 +176,213 @@ not abort the batch; the response reports the outcome per order:
       "message": "Order … is CANCELED and cannot become MATCHED" }
   ]
 }
+```
 
 Re-sending a batch is safe: orders already executed come back as `ALREADY_MATCHED` and are not
 settled twice.
+
+---
+
+## Architecture
+
+A **modular monolith**. One deployable, one database, one transaction around the operation that
+matters — creating an order and reserving the balance it needs. The reasoning is recorded in
+[ADR-0001](docs/adr/ADR-0001-Use-a-Modular-Monolith-Instead-of-Microservices.md).
+
+The seams are prepared rather than used. Domain events (`OrderPlaced`, `OrderCanceled`,
+`OrderMatched`) are published through Spring's in-process publisher, so moving to a broker later
+changes the publisher and not the domain. Were the system ever to justify splitting, the order
+would be: matching first (different load profile and latency budget), then the ledger (different
+SLA and audit requirements), with order management staying alongside the ledger because it
+shares the transaction.
+
+### Modules
+
+Four business modules plus shared plumbing. Each owns its own vertical slice rather than
+contributing to shared technical layers.
+
+| Module | Responsibility |
+|---|---|
+| `order` | The order aggregate, its lifecycle, placement and cancellation |
+| `asset` | The portfolio aggregate: balances, reservations, settlement |
+| `matching` | Operator-driven execution of pending orders |
+| `security` | Authentication and the access scope every operation is evaluated against |
+| `common` | Value objects, handler contracts, idempotency, error handling, configuration |
+
+### Layers within a module
+
 ```
+web              Controllers. Translate HTTP, resolve the access scope, nothing else.
+  ↓
+application      One handler per command or query. Loads, calls, saves, publishes.
+  ↓
+domain           Aggregates, value objects, repository interfaces. All the rules.
+  ↑
+infrastructure   Spring Data repositories, locking queries, criteria specifications.
+```
+
+Dependencies point inward. `domain` declares the repository interfaces it needs;
+`infrastructure` implements them.
+
+`Order` and `Asset` carry JPA annotations directly rather than being mapped to separate
+persistence entities. The orthodox arrangement — plain domain objects, separate entities,
+mappers between them — would mean three models and two mappers for two entities, which costs
+more readability than the isolation is worth here. Value objects stay out of the ORM's way
+behind `AttributeConverter`s, so `Amount`, `CustomerId`, `AssetName` and the rest remain pure.
+The coupling in practice is annotations plus a protected no-arg constructor; the rules
+themselves have no framework dependency. This is the first thing to revisit if the model grows,
+and splitting later is mechanical, because the domain already depends on its own repository
+interfaces rather than on Spring Data directly.
+
+### Request flow
+
+Placing an order, end to end:
+
+```
+POST /api/v1/orders
+  │
+  ├─ OrderController          resolves the target customer from the credential,
+  │                           never from the request body
+  ├─ PlaceOrderHandler        entry point for the command
+  ├─ PlaceOrderIdempotency    replays a stored result, or lets the placement run
+  └─ OrderPlacement           @Transactional — one unit of work
+       ├─ Order.place(…)              domain validates and creates the PENDING order
+       ├─ IdempotencyClaims.claim(…)  unique constraint, same transaction
+       ├─ portfolios.lockForUpdate(…) SELECT … FOR UPDATE over the customer's rows
+       ├─ portfolio.reserve(…)        domain moves the usable balance
+       └─ publish OrderPlaced
+```
+
+### The aggregate boundary
+
+`Portfolio` — the complete set of one customer's balances — is the aggregate root. `Asset` is an
+entity inside it, and all of its mutators are package-private, so balances can only move through
+the root.
+
+That boundary was chosen because it is the transactional consistency boundary: placing an order
+touches the reserved asset and, on settlement, the counter asset, and those must move together
+or not at all. It is also the locking granularity — `PortfolioRepository.lockForUpdate` locks
+exactly these rows. **Aggregate, transaction and lock are deliberately the same line.**
+
+`Order` is a separate aggregate referenced by id. Folding an unbounded, ever-growing order
+history into the portfolio would mean loading a customer's entire trading record to reserve a
+single amount. The two aggregates are therefore committed in one transaction with the portfolio
+lock providing atomicity — a conscious departure from the one-aggregate-per-transaction
+guideline, taken because the alternative is unusable.
+
+Because every order settles against TRY, the TRY row is the de-facto anchor that serialises all
+of a customer's balance changes.
+
+### Tactical DDD, no domain services
+
+The rules live on the model. `Asset.reserve`, `Asset.credit`, `Order.cancel` and `Order.match`
+enforce their own preconditions, and there are no balance or status setters. There is **no
+domain service** between the application handler and the model: a handler loads aggregates,
+calls them, saves and publishes, and nothing else. None of the four command handlers contains a
+conditional, which is the check that no rule has leaked upward.
+
+`portfolio.reserve(order.reservation())` is the whole of placement's balance logic, and both
+halves live in the domain. A rule that fits neither `Order` nor `Portfolio` is a signal that the
+aggregate boundary is wrong, not that a third class is needed.
+
+Value objects are collected in a `valueobjects` package under each domain, leaving entities and
+aggregate roots in the domain package itself, so what has identity and what does not is readable
+from the directory tree. The specification's vocabulary is kept verbatim: `usableSize`, `size`,
+`orderSide`, `createDate`, `PENDING` / `MATCHED` / `CANCELED`.
+
+Strategic DDD is deliberately absent — there is one bounded context, and context-mapping
+ceremony over a single context would be decoration.
+
+### Commands and queries
+
+Commands and queries are separated in code but share one database. The read model here is nearly
+identical to the write model — listing orders is the order table, listing assets is the asset
+table — so there is no denormalisation to gain and no read store to justify. Query handlers run
+in `readOnly` transactions, which disables Hibernate's dirty-check snapshotting on listing paths.
+
+Under real load the first step would be a connection-pool bulkhead — a reserved pool for the
+write path so a burst of reporting cannot starve order entry — then read-replica routing. Both
+are single-point changes because the code split already exists.
+
+Every operation is a record with exactly one handler implementing `CommandHandler<C, R>` or
+`QueryHandler<Q, R>`:
+
+| Command | Handler | Query | Handler |
+|---|---|---|---|
+| `PlaceOrderCommand` | `PlaceOrderHandler` | `ListOrdersQuery` | `ListOrdersHandler` |
+| `CancelOrderCommand` | `CancelOrderHandler` | `GetOrderQuery` | `GetOrderHandler` |
+| `MatchOrderCommand` | `MatchOrderHandler` | `ListAssetsQuery` | `ListAssetsHandler` |
+| `MatchOrdersCommand` | `MatchOrdersHandler` | | |
+
+Adding an operation means adding a record and a handler. Nothing existing is edited, and there
+is no registry to update — Spring discovers handlers by annotation. Handlers are injected
+directly rather than dispatched through a bus, which keeps calls type-safe and traceable in an
+IDE; a `CommandBus` resolving handlers by generic type is one class to add later if
+cross-cutting behaviour ever needs a single place to live.
+
+### Technology choices
+
+Java 25 on Spring Boot 3.5.x. Boot 4.x is available and targets Java 25, but brings Jackson 3
+and Spring Security 7 migration with it, which buys nothing for a service of this size.
+
+Virtual threads are enabled (`spring.threads.virtual.enabled`). This is safe here because Java
+24 and later removed, via [JEP 491](https://openjdk.org/jeps/491), the carrier-thread pinning
+that used to make blocking JDBC calls a poor fit; on an older JDK the setting would have to come
+back off.
+
+One version constraint is worth recording: springdoc must be 2.8.x or newer. Version 2.6.0
+compiles cleanly but fails at runtime against Spring Framework 6.2 with a `NoSuchMethodError`.
+
+### Project layout
+
+```
+com.brokerage
+├── common
+│   ├── domain
+│   │   └── valueobjects  Amount, CustomerId, AssetName, Reservation, Settlement,
+│   │                     AccessScope, IdempotencyKey, RequestFingerprint
+│   ├── application     CommandHandler, QueryHandler
+│   ├── idempotency     Claim record, repository, retention cleaner
+│   ├── jpa             Value-object attribute converters
+│   ├── web             RFC 7807 handling, pagination envelope
+│   └── config          Clock, OpenAPI, demo-data seeding
+├── asset
+│   ├── domain          Portfolio (aggregate root), Asset, PortfolioRepository
+│   ├── application
+│   │   └── query       ListAssetsQuery + handler, read model
+│   ├── infrastructure  JPA repositories, locking, specifications
+│   └── web             AssetController
+├── order
+│   ├── domain          Order (aggregate root), repository, events
+│   │   └── valueobjects  OrderSide, OrderStatus
+│   ├── application
+│   │   ├── command     PlaceOrder, CancelOrder + handlers, placement,
+│   │   │               idempotency policy
+│   │   └── query       ListOrders, GetOrder + handlers
+│   ├── infrastructure  Query repository, specifications
+│   └── web             OrderController
+├── matching
+│   ├── application
+│   │   └── command     MatchOrder, MatchOrders + handlers, per-order report
+│   └── web             MatchingController
+└── security            AccessPolicy, principal, user store, filter chain
+```
+
+Schema migrations live in `src/main/resources/db/migration`. Flyway owns the schema; Hibernate
+runs with `ddl-auto: validate` and fails startup if the mapping and the migration disagree.
+
+---
+
+## Architecture decision records
+
+The two decisions with the widest blast radius are recorded separately in
+[`docs/adr`](docs/adr), each with the situation that forced it and the reasoning behind it.
+The rest of the design rationale is inline in this document, next to the thing it explains.
+
+| # | Decision | Status |
+|---|---|---|
+| [ADR-0001](docs/adr/ADR-0001-Use-a-Modular-Monolith-Instead-of-Microservices.md) | Use a modular monolith instead of microservices | Accepted |
+| [ADR-0002](docs/adr/ADR-0002-Idempotent-Order-Creation.md) | Idempotent order creation | Accepted |
 
 ---
 
@@ -183,184 +406,62 @@ pending order. Every operation is a movement between the two:
 | Cancel | `TRY.usableSize += size × price` | `X.usableSize += size` |
 | Match | `TRY.size −= size × price`<br>`X.size += size`, `X.usableSize += size` | `X.size −= size`<br>`TRY.size += size × price`, `TRY.usableSize += size × price` |
 
-On matching, the outgoing leg reduces only `size`: its `usableSize` was already removed when
-the order was placed, so deducting it twice would double-charge the customer.
+On matching, the outgoing leg reduces only `size`: its `usableSize` was already removed when the
+order was placed, so deducting it twice would double-charge the customer.
 
-Both legs of an order are derived in exactly one place — `OrderSide` — so the amount reserved
-at placement, released on cancellation and settled on matching cannot drift apart.
-
----
-
-## Architecture
-
-### Tactical DDD
-
-The invariant above is the service's only real risk, and DDD's tactical patterns exist
-precisely to make an invariant unbreakable from outside. That is why they are used here, and
-why the strategic half is not: there is one bounded context, and context-mapping ceremony over
-a single context would be decoration.
-
-**Rich entities, no anemic model.** `Asset.reserve()`, `Asset.credit()`, `Order.cancel()` and
-`Order.match()` enforce their own rules. There are no balance or status setters, so no caller —
-present or future — can move a balance or a lifecycle state without passing through the checks.
-
-**Value objects.** Collected in a `valueobjects` package under each domain so the tactical
-building blocks are visible at a glance rather than mixed in with entities and exceptions:
-
-| Package | Value objects |
-|---|---|
-| `common.domain.valueobjects` | `Amount`, `CustomerId`, `AssetName`, `Reservation`, `Settlement`, `AccessScope` |
-| `order.domain.valueobjects` | `OrderSide`, `OrderStatus` |
-
-`Amount` is BigDecimal at a fixed scale, never floating point. Typed identifiers make the
-classic transposition bug in calls like `reserve(customerId, assetName)` a compile error
-rather than a support ticket. Entities and aggregate roots — `Order`, `Asset`, `Portfolio` —
-stay in the domain package itself, so the distinction between what has identity and what does
-not is readable from the directory tree.
-
-**Ubiquitous language.** The specification's vocabulary is kept verbatim — `usableSize`, `size`,
-`orderSide`, `createDate`, `PENDING`/`MATCHED`/`CANCELED`. Renaming `usableSize` to something
-more "domain-like" would lose the shared language, which is the point of having one.
-
-### The aggregate boundary is the lock boundary
-
-`Portfolio` — one customer's complete set of balances — is the aggregate root. `Asset` is an
-entity inside it, and all of its mutators are package-private: balances move only through the
-root.
-
-That boundary was chosen because it is the **transactional consistency boundary**: placing an
-order touches the reserved asset and, on settlement, the counter asset, and those must move
-together or not at all. It is also the **locking granularity** — `PortfolioRepository`
-`SELECT … FOR UPDATE`s exactly these rows. Aggregate, transaction and lock are deliberately
-the same line.
-
-`Order` is a separate aggregate referenced by id. Folding an unbounded, ever-growing order
-history into the portfolio would mean loading a customer's entire trading record to reserve a
-single amount. The two aggregates are therefore committed in one transaction with the
-portfolio lock providing atomicity — a conscious, documented departure from the
-one-aggregate-per-transaction guideline, taken because the alternative is unusable.
-
-### Modular monolith, not microservices
-
-Order placement is one atomic operation: create the order and reserve the balance. Splitting
-`Order` and `Asset` into separate services would replace an ACID transaction with a saga, an
-outbox, idempotency keys and a reconciliation job for half-reserved orders — and would buy
-nothing here: no independent scaling need, no separate deploy cadence, no second team. That is
-a distributed monolith with extra failure modes.
-
-The module boundaries are drawn where the seams would be if that ever changed:
-
-| Module | Would split off when |
-|---|---|
-| `matching` | First. Different load profile and latency budget; scales independently |
-| `asset` (ledger) | Next. The heart of the system; separate SLA and audit requirements |
-| `order` | Stays with the ledger — same transaction, most expensive to separate |
-| Read/reporting | Cheap and early: read-only, no writer to break |
-
-Domain events (`OrderPlaced`, `OrderCanceled`, `OrderMatched`) are published through Spring's
-in-process publisher. They need no infrastructure today and keep the seam visible: moving to a
-broker later changes the publisher, not the domain.
-
-### CQRS at the code level only
-
-Every command and every query is a record, handled by exactly one class implementing
-`CommandHandler<C, R>` or `QueryHandler<Q, R>`. Adding an operation means adding a command or
-query and its handler; nothing existing is edited, so handlers stay small and single-purpose
-instead of accumulating into a service that does everything.
-
-| Command | Handler |
-|---|---|
-| `PlaceOrderCommand` | `PlaceOrderHandler` |
-| `CancelOrderCommand` | `CancelOrderHandler` |
-| `MatchOrderCommand` | `MatchOrderHandler` |
-| `MatchOrdersCommand` | `MatchOrdersHandler` |
-
-| Query | Handler |
-|---|---|
-| `ListOrdersQuery` | `ListOrdersHandler` |
-| `GetOrderQuery` | `GetOrderHandler` |
-| `ListAssetsQuery` | `ListAssetsHandler` |
-
-Handlers are injected directly rather than dispatched through a bus. Direct injection keeps
-the call type-safe and traceable in an IDE; a `CommandBus` resolving handlers by generic type
-is a single class to add later if cross-cutting behaviour ever needs one place to live.
-
-Command and query sides use distinct repositories, and query handlers run in `readOnly`
-transactions, which disables Hibernate dirty-check snapshotting on listing endpoints.
-
-A handler contains no business rules. It loads aggregates, calls them, saves and publishes —
-nothing more. There is no domain service between the handler and the model: `Order` decides
-what an order reserves and which lifecycle transitions are legal, and `Portfolio` decides how
-a balance moves. `portfolio.reserve(order.reservation())` is the whole of order placement's
-balance logic, and both halves of it live in the domain.
-
-They are **not** separated in infrastructure. A single database serves both, because read and
-write shapes here are near-identical (`List Orders` is the order table; `List Assets` is the
-asset table) and there is no denormalisation to gain. Splitting the store would add eventual
-consistency and a read-your-own-writes problem in exchange for nothing.
-
-Under real load, the first step would not be a read store but a **connection-pool bulkhead** —
-a reserved pool for the write path so a burst of reporting queries cannot starve order entry —
-followed by read-replica routing. Both are single-point changes because the code split already
-exists. The system's actual scale limit is neither: it is that one customer's balance updates
-must serialise, which is a correctness requirement, not a bottleneck to optimise away.
+Both legs of an order are derived in exactly one place — `OrderSide` — so the amount reserved at
+placement, released on cancellation and settled on matching cannot drift apart.
 
 ---
 
 ## Concurrency
 
-Two simultaneous BUY orders must not both see a sufficient balance and both succeed. The
-defence has four layers:
+Two simultaneous BUY orders must not both see a sufficient balance and both succeed. Reading the
+balance and *then* locking leaves exactly the race the lock is meant to close, so the defence is
+built in four layers:
 
-1. **Pessimistic write lock** over the customer's asset rows, taken *before* the balance is
-   read. Check-then-lock would leave exactly the race it is meant to close.
-2. **Deterministic lock ordering** — orders row first, then asset rows sorted by asset name —
-   so overlapping transactions queue instead of deadlocking.
-3. **Optimistic `@Version`** on both entities, guarding any future code path that reaches a
-   row without taking the portfolio lock.
-4. **Database `CHECK` constraints** (`usable_size >= 0`, `usable_size <= size`). A corrupted
-   balance is unrecoverable without an audit trail, so the invariant is also enforced where no
-   application bug can reach.
+1. **Pessimistic write lock** over the customer's asset rows, taken *before* the balance is read
+   for a decision
+2. **Deterministic lock ordering** — the order row first, then asset rows sorted by asset name —
+   which makes deadlock impossible rather than merely unlikely
+3. **Optimistic `@Version`** on both entities, guarding any future path that reaches a row
+   without taking the portfolio lock
+4. **Database `CHECK` constraints** (`usable_size >= 0`, `usable_size <= size`). These are not
+   redundant with the aggregate: a corrupted balance is unrecoverable without an audit trail, so
+   the invariant is also enforced where no application bug can reach it
 
-Lock waits are bounded (`jakarta.persistence.lock.timeout`), and lock or version conflicts
+Lock waits are bounded by `jakarta.persistence.lock.timeout`, and lock or version conflicts
 surface as `409` with a retryable code rather than a generic `500`.
 
-Verified behaviour: ten concurrent BUY orders of 10 000 TRY each against a 75 000 TRY balance
-produce exactly seven `201`s and three `422`s, with no overdraft.
+A customer's balance changes serialise as a result. That is a correctness requirement, not a
+bottleneck to optimise away, and it does not affect throughput across customers, which
+parallelises freely.
 
-### Virtual threads
-
-`spring.threads.virtual.enabled` is on. This is safe on Java 24 and later, where
-[JEP 491](https://openjdk.org/jeps/491) removed the carrier-thread pinning that used to make
-blocking JDBC calls a poor fit for virtual threads.
+Optimistic locking alone was rejected: it would detect the conflict only after the work is done,
+and would push retry logic into every caller of a financial write.
 
 ---
 
 ## Idempotency
 
-Networks lose responses. A client that times out on `POST /orders` cannot tell whether the
-order was created, and the API already tells clients to retry on a lock conflict — so retrying
-has to be safe by construction, not by luck.
+Every write path is safe to retry, by two different mechanisms.
 
-Three of the four write paths are idempotent for free, because the client names the resource
-and the lifecycle converges on a terminal state:
+Where the client names the resource, the lifecycle converges on its terminal state.
+`Order.cancel` and `Order.match` return an `Optional` describing the balance movement to apply,
+empty when the order is already in the target state — so the domain decides, and the handler
+simply applies whatever it is handed:
 
 | Endpoint | Retry behaviour |
 |---|---|
 | `DELETE /orders/{id}` | Already `CANCELED` → `200`, same view. Only `MATCHED` conflicts (`409`) |
 | `POST /admin/orders/match` | Already `MATCHED` → `ALREADY_MATCHED`, never settled twice |
-| `POST /orders` | Needs an idempotency key — it *creates* the identity |
 
-### Idempotency keys
+A retry that reaches the same terminal state has achieved the caller's intent, so it succeeds; a
+retry that conflicts with a *different* terminal state is a genuine conflict and gets `409`.
 
-Send a client-generated key with the placement request:
-
-```bash
-curl -u admin:admin123 -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: 3f9a1c7e-2b44-4c0f-9a6d-8e1b5c2d7f01' \
-  -X POST http://localhost:8080/api/v1/orders \
-  -d '{"customerId":"CUST-1001","assetName":"THYAO","orderSide":"BUY","size":100,"price":300}'
-```
+Order placement is the exception: it *creates* the identity, so there is nothing to converge on
+and it takes a client-generated key instead. The decision is recorded in
+[ADR-0002](docs/adr/ADR-0002-Idempotent-Order-Creation.md).
 
 | Situation | Response |
 |---|---|
@@ -369,39 +470,42 @@ curl -u admin:admin123 -H 'Content-Type: application/json' \
 | Same key, different payload | `422 IDEMPOTENCY_KEY_REUSE` |
 | No key sent | Not deduplicated — every request creates an order |
 
-The claim row is written **inside the placement transaction**, against
-`UNIQUE (customer_id, idempotency_key)`. That single constraint carries the whole design:
+The claim is written inside the placement transaction against
+`UNIQUE (customer_id, idempotency_key)`, so claim and order commit together and a concurrent
+duplicate blocks on the index rather than needing an `IN_PROGRESS` state — and therefore needs
+no reaper for claims left behind by a crashed process. If placement fails, the claim rolls back
+with it, so a genuine retry is free to execute.
 
-- The claim and the order commit together, so there is never an orphaned claim pointing at an
-  order that does not exist, nor an order without its claim.
-- A concurrent duplicate blocks on the unique index until the first request commits, then fails
-  and replays the stored result. No `IN_PROGRESS` state is needed, and therefore no reaper for
-  claims left behind by a crashed process.
-- If placement fails, the claim rolls back with it, so a genuine retry after a rejected order
-  is free to execute.
+The fingerprint is a SHA-256 over normalised domain values rather than the raw request body, so
+`100` and `100.00` are the same request; parts are length-prefixed before hashing so a separator
+cannot be moved between them. Only successful placements are recorded: a rejected order
+committed nothing, so re-running it is harmless and produces the same rejection.
 
-Verified: ten simultaneous requests carrying the same key produce one `201`, nine `200`s, a
-single order and a single reservation.
+Claims are purged after `app.idempotency.retention` (default 24 hours). That window is exactly
+how long a retry stays safe, so it is a contract with clients rather than housekeeping.
 
-### Fingerprints
+---
 
-The stored fingerprint is a SHA-256 over the *normalised domain values* — customer, asset,
-side, and the amounts as `Amount` renders them — not over the raw request body. Hashing the
-body would make `100` and `100.00` different requests and reject a legitimate retry, since
-`Amount` treats them as the same quantity.
+## Security
 
-### What is deliberately not cached
+HTTP Basic over a stateless API, BCrypt-hashed credentials, roles `ADMIN` and `CUSTOMER`.
 
-Only successful placements are recorded. A rejected order committed nothing, so re-running it
-is harmless and produces the same rejection. Caching failures would mean writing the claim in
-its own transaction and reaping the ones left behind by crashes — real cost, no benefit at this
-scale.
+The customer-scoping rule is enforced structurally rather than by remembering a check.
+`AccessPolicy` is the only code that reads the security context; it produces an `AccessScope`
+value that must be passed into the application layer:
 
-### Retention
+- an **employee** gets an unrestricted scope and must name a customer;
+- a **customer** gets a scope pinned to their own id — a `customerId` naming anyone else is
+  rejected with `403`.
 
-Claims are purged after `app.idempotency.retention` (default 24 hours) by a scheduled job. The
-retention window is exactly how long a retry stays safe, so it is a contract with clients, not
-a housekeeping detail.
+Because the scope is a parameter rather than an ambient lookup, an endpoint cannot silently
+forget authorisation, and the rule is exercisable without an authenticated request. Operator
+endpoints live under `/api/v1/admin/**`, which the filter chain gates on the `ADMIN` role, so
+authorisation cannot be lost by omitting an annotation on a new method.
+
+CSRF protection is disabled deliberately: it defends against a browser attaching ambient
+credentials to a forged request, and there are none here — no session, no cookie, every call
+carries its own `Authorization` header.
 
 ---
 
@@ -433,102 +537,101 @@ Status codes are chosen to tell the client what to do next:
 
 ---
 
-## Security
+## Testing strategy
 
-HTTP Basic over a stateless API, BCrypt-hashed credentials, roles `ADMIN` and `CUSTOMER`.
+186 tests, all run by `./mvnw test`. Coverage is **99.6% of instructions** and **98.1% of
+branches**; `verify` fails the build under 90%.
 
-The customer-scoping rule (Bonus 1) is enforced structurally rather than by remembering a
-check. `AccessPolicy` is the only code that reads the security context; it produces an
-`AccessScope` value that must be passed into the application layer:
+| Kind | Named | Count | What it proves |
+|---|---|---|---|
+| Unit | `*Test` | 140 | Domain rules in isolation, handlers against mocks |
+| Integration | `*IntegrationTest` | 38 | The real stack: HTTP, security, Flyway schema, JPA, transactions |
+| Concurrency | `*ConcurrencyTest` | 8 | Invariants hold when requests collide |
 
-- an **employee** gets an unrestricted scope and must name a customer;
-- a **customer** gets a scope pinned to their own id — a `customerId` in the request naming
-  anyone else is rejected with `403`, and one naming themselves is redundant.
+### Unit tests
 
-Because the scope is a parameter rather than an ambient lookup, an endpoint cannot silently
-forget authorisation, and the rule is exercisable without an authenticated request. Operator
-endpoints live under `/api/v1/admin/**`, which the filter chain gates on the `ADMIN` role, so
-authorisation cannot be lost by omitting an annotation on a new method.
+The weight sits on the domain, where the rules are. `AssetTest` and `PortfolioTest` drive the
+reservation ledger directly, from inside the aggregate's own package so they exercise the
+package-private mutators the way `Portfolio` does. `OrderTest` covers the lifecycle. Handlers
+are tested against mocked repositories — they should contain no rules, and these tests fail if
+one appears.
 
-CSRF protection is disabled deliberately: it defends against a browser attaching ambient
-credentials to a forged request, and there are none here — no session, no cookie, every call
-carries its own `Authorization` header.
+### Integration tests
+
+Full Spring context and MockMvc. Each test provisions its own customer, so nothing depends on
+execution order or on the demo seed, and assertions go through the aggregate to the database
+rather than stopping at the response body — which is what catches a balance that moved when it
+should not have.
+
+| File | Covers |
+|---|---|
+| [`src/test/java/com/brokerage/order/web/OrderApiIntegrationTest.java`](src/test/java/com/brokerage/order/web/OrderApiIntegrationTest.java) | Placement reserving the right leg, overdraft refusal, currency rejection, field-level validation, half-open date range, status/asset/side filters, fetch by id, cancellation and its retry |
+| [`src/test/java/com/brokerage/order/web/IdempotencyIntegrationTest.java`](src/test/java/com/brokerage/order/web/IdempotencyIntegrationTest.java) | Replay headers and status codes, amount normalisation, key reuse rejection, per-customer key scoping, behaviour without a key, no claim left behind by a rejected order |
+| [`src/test/java/com/brokerage/asset/web/AssetApiIntegrationTest.java`](src/test/java/com/brokerage/asset/web/AssetApiIntegrationTest.java) | Holdings listing, asset-name filter, `nonZeroOnly`, reserved amount reported after a pending order |
+| [`src/test/java/com/brokerage/matching/web/MatchingApiIntegrationTest.java`](src/test/java/com/brokerage/matching/web/MatchingApiIntegrationTest.java) | Both legs of a BUY and a SELL settling, retried batch reporting `ALREADY_MATCHED`, one rejection not aborting the batch, empty batch validation, unknown order reported rather than thrown |
+| [`src/test/java/com/brokerage/security/web/SecurityIntegrationTest.java`](src/test/java/com/brokerage/security/web/SecurityIntegrationTest.java) | Anonymous challenge, bad credentials, public API docs, customer confined to their own holdings and orders, operator endpoint restricted to `ADMIN` |
+| [`src/test/java/com/brokerage/common/idempotency/IdempotencyRetentionIntegrationTest.java`](src/test/java/com/brokerage/common/idempotency/IdempotencyRetentionIntegrationTest.java) | A claim inside the retention window survives a purge; one beyond it is removed |
+
+### Concurrency tests
+
+Real threads, real transactions, released together from a common start line by
+`src/test/java/com/brokerage/support/ConcurrentRuns.java`.
+
+| File | Setup | Assertion |
+|---|---|---|
+| [`src/test/java/com/brokerage/concurrency/OrderPlacementConcurrencyTest.java`](src/test/java/com/brokerage/concurrency/OrderPlacementConcurrencyTest.java) | 20 simultaneous BUYs of 10 000 TRY against a 75 000 TRY balance | exactly 7 accepted, 13 refused, `usableSize` exactly 5 000, `size` untouched |
+| ″ | 20 simultaneous SELLs against a 250-share holding | exactly 2 accepted; `0 ≤ usableSize ≤ size` holds throughout |
+| [`src/test/java/com/brokerage/concurrency/IdempotencyConcurrencyTest.java`](src/test/java/com/brokerage/concurrency/IdempotencyConcurrencyTest.java) | 20 simultaneous requests sharing one key | one order, one reservation, exactly one non-replayed response |
+| ″ | 5 simultaneous requests with distinct keys | five orders, five reservations |
+| [`src/test/java/com/brokerage/concurrency/OrderLifecycleConcurrencyTest.java`](src/test/java/com/brokerage/concurrency/OrderLifecycleConcurrencyTest.java) | 16 simultaneous cancellations of one order | all succeed, reservation released exactly once |
+| ″ | 16 simultaneous matches of one order | exactly one settlement applied |
+| ″ | cancellations racing matches on one order | one terminal state, balances consistent with it |
 
 ---
 
-## Trade-offs and known limitations
+## Known limitations
 
-**"Delete order" cancels rather than deletes.** The specification calls the endpoint delete but
-describes cancellation. Orders are financial records; they are kept in `CANCELED` status and no
-row is ever removed. An order that exists but is no longer pending answers `409`, not `404`, so
-the caller can tell "no such order" from "too late".
-
-**Matching has no order book.** Bonus 2 asks for an operator endpoint that marks a set of
-pending orders as executed, and that is what is implemented. There is no counterparty
+**Matching has no order book.** The optional extension asks for an operator endpoint that marks
+a set of pending orders as executed, and that is what is implemented. There is no counterparty
 matching, no price-time priority and no partial fills — each order settles in full at its own
 limit price. A real engine would match opposing orders against each other; that is a different
 component with a different design, deliberately out of scope.
-
-**The domain model carries JPA annotations.** A separate persistence model with mappers would
-isolate the domain from the ORM. At two entities the mapping cost exceeds the benefit and it
-would hurt the readability the exercise asks for. This is the first thing to change if the
-model grows.
-
-**Queries load entities.** Dynamic filtering uses criteria specifications, which need entities
-rather than a narrower projection. `readOnly` transactions remove the cost that matters most
-(dirty-check snapshots). A fixed-shape, high-volume report would justify a constructor
-projection instead.
 
 **Date bounds are optional.** The specification says "within a specified date range". Both
 bounds are accepted but neither is required, since refusing to list a customer's orders without
 a date range is a worse default than an unbounded — but always paginated — result.
 
 **Every customer needs a TRY row.** Because every order settles against TRY, the TRY row is the
-de-facto lock anchor that serialises all of a customer's portfolio mutations. Seeded customers
-get one. A customer created with no TRY row at all cannot place orders, and customer onboarding
-is outside the scope of this exercise.
+de-facto lock anchor that serialises a customer's portfolio mutations. Seeded customers get one.
+A customer created with no TRY row cannot place orders, and customer onboarding is outside the
+scope of this exercise.
 
-**Single connection pool.** As argued above, the read/write split stops at the code level. The
-bulkhead is described, not implemented, because it would be unexercised complexity at
-evaluation scale.
+**Domain events have no subscribers.** `OrderPlaced`, `OrderCanceled` and `OrderMatched` are
+published through Spring's in-process publisher, but nothing consumes them yet. They exist as a
+seam, not a feature. Anything with side effects should subscribe with
+`@TransactionalEventListener` so it runs after commit; and an event can still be lost if the
+process dies between commit and delivery, which is what an outbox would fix.
 
----
+**Single connection pool.** The read/write split stops at the code level. The bulkhead described
+under [Commands and queries](#commands-and-queries) is documented, not implemented, because it
+would be unexercised complexity at evaluation scale.
 
-## Project layout
+**Persistence is in-memory.** H2 with `DB_CLOSE_DELAY=-1`, as the specification allows. Nothing
+in the code depends on H2 specifically.
 
-```
-com.brokerage
-├── common
-│   ├── domain
-│   │   └── valueobjects  Amount, CustomerId, AssetName, Reservation,
-│   │                     Settlement, AccessScope, IdempotencyKey,
-│   │                     RequestFingerprint
-│   ├── application     CommandHandler, QueryHandler
-│   ├── idempotency     Claim record, repository, retention cleaner
-│   ├── jpa             Value-object attribute converters
-│   ├── web             RFC 7807 handling, pagination envelope
-│   └── config          Clock, OpenAPI, demo-data seeding
-├── asset
-│   ├── domain          Portfolio (aggregate root), Asset, PortfolioRepository
-│   ├── application
-│   │   └── query       ListAssetsQuery + handler, read model
-│   ├── infrastructure  JPA repositories, locking, specifications
-│   └── web             AssetController
-├── order
-│   ├── domain          Order (aggregate root), repository, events
-│   │   └── valueobjects  OrderSide, OrderStatus
-│   ├── application
-│   │   ├── command     PlaceOrder, CancelOrder + handlers, placement,
-│   │   │               idempotency policy
-│   │   └── query       ListOrders, GetOrder + handlers
-│   ├── infrastructure  Query repository, specifications
-│   └── web             OrderController
-├── matching
-│   ├── application
-│   │   └── command     MatchOrder, MatchOrders + handlers, per-order report
-│   └── web             MatchingController
-└── security            AccessPolicy, principal, user store, filter chain
-```
 
-Schema migrations live in `src/main/resources/db/migration`. Flyway owns the schema; Hibernate
-runs with `ddl-auto: validate` and fails startup if the mapping and the migration disagree.
+## AI-Assisted Development
+
+AI coding tools were used throughout the development of this project as an
+engineering assistant.
+
+AI was primarily used for:
+
+- Reviewing unit, integration and concurrency test scenarios
+- Identifying potential edge cases and concurrency issues
+- Assisting with refactoring and repetitive implementation work
+- Reviewing code for potential bugs and over-engineering
+- Preparing architecture diagrams and reviewing architectural documents
+
+The goal was to use AI to improve development speed and exploration while
+keeping technical ownership.
