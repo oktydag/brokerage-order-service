@@ -329,8 +329,8 @@ cross-cutting behaviour ever needs a single place to live.
 Java 25 on Spring Boot 3.5.x. Boot 4.x is available and targets Java 25, but brings Jackson 3
 and Spring Security 7 migration with it, which buys nothing for a service of this size.
 
-Virtual threads are enabled (`spring.threads.virtual.enabled`). This is safe here because Java
-24 and later removed.
+Virtual threads are enabled (`spring.threads.virtual.enabled`). This is safe here because Java 24 and later removed the need for explicit
+virtual-thread configuration for the relevant executor behavior.
 
 ### Project layout
 
@@ -422,7 +422,7 @@ built in four layers:
 1. **Pessimistic write lock** over the customer's asset rows, taken *before* the balance is read
    for a decision
 2. **Deterministic lock ordering** — the order row first, then asset rows sorted by asset name —
-   which makes deadlock impossible rather than merely unlikely
+   which prevents circular-wait deadlocks for these application-managed locks
 3. **Optimistic `@Version`** on both entities, guarding any future path that reaches a row
    without taking the portfolio lock
 4. **Database `CHECK` constraints** (`usable_size >= 0`, `usable_size <= size`). These are not
